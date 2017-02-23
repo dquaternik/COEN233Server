@@ -62,7 +62,7 @@ int deserialize_data(datapack *data, char buffer[]);
 databuf *new_ackbuf();
 databuf *new_rejbuf();
 int ack(char client, char segnum, int sockfd, struct sockaddr_in theiraddr);
-int rej(char client, char sub, struct sockaddr_in theiraddr);
+int rej(char client,char segnum, char sub, int sockfd, struct sockaddr_in theiraddr);
 void serialize_ack(ackpack pack, databuf *b);
 void serialize_short(short x, databuf *b);
 void serialize_char(char x, databuf *b);
@@ -79,8 +79,6 @@ int main(void)
     unsigned char buf[MAXBUFLEN];
     socklen_t addr_len;
     char s[INET_ADDRSTRLEN];
-    databuf *packbuff = new_ackbuf();
-    ackpack *pack = malloc(sizeof(ackpack));
     datapack *out = malloc(sizeof(datapack));
     int count = 0;
 
@@ -156,10 +154,31 @@ int main(void)
 
         //Setup for deserialization
         int check = deserialize_data(out,buf);
-        if(check != 0){
-            perror("Packet Error in Field: ");
-            return check;
+        if(check == 1){
+            printf("Packet Error in Field: %d\n",check);
+            rej(out->clientid,out->segnum,check,sockfd,clientaddr);
+            break;
+        }else if(check == 2){
+            printf("Packet Error in Field: %d\n",check);
+            rej(out->clientid,out->segnum,check,sockfd,clientaddr);
+            break;
+        }else if(check == 5){
+            printf("Packet Error in Field: %d\n",check);
+            rej(out->clientid,out->segnum,check,sockfd,clientaddr);
+            break;
+        }else if(check == 7){
+            printf("Packet Error in Field: %d\n",check);
+            rej(out->clientid,out->segnum,check,sockfd,clientaddr);
+            break;
         }
+
+        //Check error in segment number
+        if(out->segnum != count+1){
+            printf("Packet Error in Field 4\n");
+            rej(out->clientid,out->segnum,4,sockfd,clientaddr);
+            break;
+        };
+
 
         //Check packet values by eye. Printed in decimal
         printf("start: %d\n",out->startid);
@@ -169,28 +188,12 @@ int main(void)
         printf("len: %d\n",out->len);
         printf("end: %d\n",out->endid);
 
-        printf("Beginning ACK\n");
-        pack->startid = STARTID;
-        printf("Startid: %d\n",pack->startid);
-        pack->clientid = out->clientid;
-        printf("clientid: %d\n",pack->clientid);
-        pack->ack = ACK;
-        printf("ack: %d\n",pack->ack);
-        pack->segnum = out->segnum;
-        printf("segnum: %d\n",pack->segnum);
-        pack->endid = ENDID;
-        printf("endid: %d\n",pack->endid);
-        serialize_ack(pack[0], packbuff);
 
-        numbytes = sendto(sockfd, packbuff->data, packbuff->size, 0, (struct sockaddr *)&clientaddr, addr_len);
-        if(numbytes == -1)
-        {
-            perror("Ack Failed\n");
-            exit(1);
-        } else{
-            printf("Ack Sent\n");
-        }
+        ack(out->clientid,out->segnum,sockfd,clientaddr);
+
         count++;
+        memset(out->payload,0,sizeof(out->payload));
+
         //LOOP END
 
     }
@@ -198,8 +201,6 @@ int main(void)
 
     //close the socket
     close(sockfd);
-    free(packbuff);
-    free(pack);
     return 0;
 
 }
@@ -214,6 +215,9 @@ void *get_addr(struct sockaddr *sa)
 //Gets data out of the packet and error checks to ensure packet follows proper structure.
 int deserialize_data(datapack *pack, char buffer[])
 {
+    int end = ENDID;
+    int i = 0;
+    int ex1;
     //Error checking line
     //printf("buff[2] = %d buff[5] = %d\n",(u_char) buffer[2],(u_char) buffer[5]);
 
@@ -238,7 +242,7 @@ int deserialize_data(datapack *pack, char buffer[])
     else{
         pack->data = buffer[4] + buffer[3];
         if(pack->data != DATA){
-            return 2;
+            return 3;
         }
     }
 
@@ -249,24 +253,26 @@ int deserialize_data(datapack *pack, char buffer[])
     pack->len = buffer[6];
 
     //Get the payload
-    int i = 0;
-    while(i<pack->len){
+    while(i<MAXPAY){
         pack->payload[i] = buffer[7+i];
+        printf("pack.payload[i] %c\n",pack->payload[i]);
         i++;
     };
 
     //Check payload length
-    if(pack->payload[pack->len] != '\0'){
+    ex1 = pack->len;
+    if(pack->payload[ex1] != '\0'){
         return 5;
     }
 
+
     //Check the ENNDID
-    if((u_char) buffer[8+i] == 0xff && (u_char) buffer[9+i] == 0xff){
+    if((u_char) buffer[8+MAXPAY] == 0xff && (u_char) buffer[9+MAXPAY] == 0xff){
         pack->endid = ENDID;
     }
     else{
-        pack->endid = buffer[8+i] + buffer[9+i];
-        if(pack->endid != ENDID){
+        pack->endid = buffer[8+MAXPAY] + buffer[9+MAXPAY];
+        if(pack->endid != end){
             return 7;
         }
     }
@@ -295,9 +301,59 @@ databuf *new_rejbuf(){
     b->next = 0;
 }
 
-int rej(char client, char sub, struct sockaddr_in theiraddr)
-{
+int ack(char client, char segnum, int sockfd, struct sockaddr_in theiraddr){
 
+    ackpack *pack = malloc(sizeof(ackpack));
+    databuf *packbuff = new_ackbuf();
+    int numbytes;
+    int addr_len = sizeof(theiraddr);
+
+    pack->startid = STARTID;
+    pack->clientid = client;
+    pack->ack = ACK;
+    pack->segnum = segnum;
+    pack->endid = ENDID;
+    serialize_ack(*pack, packbuff);
+
+
+    numbytes = sendto(sockfd, packbuff->data, packbuff->size, 0, (struct sockaddr *)&theiraddr, addr_len);
+    if(numbytes == -1)
+    {
+        perror("Ack Failed\n");
+        exit(1);
+    } else{
+        printf("Ack Sent\n");
+    }
+    free(pack);
+    free(packbuff);
+
+};
+
+int rej(char client,char segnum, char sub, int sockfd, struct sockaddr_in theiraddr) {
+
+    rejpack *pack = malloc(sizeof(rejpack));
+    databuf *packbuff = new_rejbuf();
+    int numbytes;
+    int addr_len = sizeof(theiraddr);
+
+    pack->startid = STARTID;
+    pack->clientid = client;
+    pack->reject = REJECT;
+    pack->subc = sub;
+    pack->segnum = segnum;
+    pack->endid = ENDID;
+
+    serialize_rej(*pack,packbuff);
+    numbytes = sendto(sockfd, packbuff->data, packbuff->size, 0, (struct sockaddr *)&theiraddr, addr_len);
+    if(numbytes == -1)
+    {
+        perror("Rej Failed\n");
+        exit(1);
+    } else{
+        printf("Rej Sent\n");
+    }
+    free(pack);
+    free(packbuff);
 };
 
 void serialize_ack(ackpack pack, databuf *b){
@@ -306,6 +362,16 @@ void serialize_ack(ackpack pack, databuf *b){
     serialize_short(pack.ack,b);
     serialize_char(pack.segnum,b);
     serialize_short(pack.endid,b);
+};
+
+void serialize_rej(rejpack pack, databuf *b){
+    serialize_short(pack.startid,b);
+    serialize_char(pack.clientid,b);
+    serialize_short(pack.reject,b);
+    serialize_short(pack.subc,b);
+    serialize_char(pack.segnum,b);
+    serialize_short(pack.endid,b);
+
 };
 
 void serialize_short(short x, databuf *b){
