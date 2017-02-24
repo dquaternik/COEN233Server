@@ -19,6 +19,10 @@
 #define DATA 0xfff1
 #define ACK 0xfff2
 #define REJECT 0xfff3
+#define REJSUB1 0xfff4
+#define REJSUB2 0xfff5
+#define REJSUB3 0xfff6
+#define REJSUB4 0xfff7
 
 //Define packet structures
 typedef struct datapack {
@@ -76,12 +80,13 @@ int main(void)
     int numbytes;
     struct sockaddr_storage their_addr;
     struct sockaddr_in clientaddr;
-    unsigned char buf[MAXBUFLEN];
+    struct pollfd fd;
+    unsigned char buf[MAXBUFLEN], buf1[MAXBUFLEN];
     socklen_t addr_len;
     char s[INET_ADDRSTRLEN];
     datapack *out = malloc(sizeof(datapack));
-    int count = 0;
-
+    int count = 0, lastsegnum = 0, i = 0, bufcount = 0;
+    int clientid, check, res;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET; //IPv4
@@ -119,6 +124,9 @@ int main(void)
         fprintf(stderr, "Listener failed to bind to socket.\n");
         return 2;
     }
+    //Setup polling
+    fd.fd = sockfd;
+    fd.events = POLLIN;
 
     //release memory for server info (only needed for error checking)
     freeaddrinfo(servinfo);
@@ -126,18 +134,31 @@ int main(void)
     //LOOP START
 
 
-    while(count < 3)
-    {
+    while(1) {
         //Start 'listening'
         printf("Listener waiting to receive...\n");
 
 
+        //Poll for 5 minutes. If no contact in that time break the loop.
+        res = poll(&fd,1,300000);
         addr_len = sizeof(clientaddr);
-        //Receive something and ensure it is something
-        if((numbytes = recvfrom(sockfd, buf, MAXBUFLEN-1, 0, (struct sockaddr *)&clientaddr, &addr_len)) == -1)
-        {
-            perror("Nothing received");
+
+        if(res == 0){
+            //timeout
+            //break loop to close socket and free ip
+            break;
+
+        } else if(res == -1){
+            //error
+            perror("Poll Error");
             exit(1);
+        } else {
+            //Receive something and ensure it is something
+            if((numbytes = recvfrom(sockfd, buf, MAXBUFLEN-1, 0, (struct sockaddr *)&clientaddr, &addr_len)) == -1)
+            {
+                perror("Nothing received");
+                exit(1);
+            }
         }
 
 
@@ -153,31 +174,42 @@ int main(void)
         buf[numbytes] = '\0';
 
         //Setup for deserialization
-        int check = deserialize_data(out,buf);
+        check = deserialize_data(out,buf);
         if(check == 1){
             printf("Packet Error in Field: %d\n",check);
             rej(out->clientid,out->segnum,check,sockfd,clientaddr);
             break;
-        }else if(check == 2){
+        } else if(check == REJSUB2){
             printf("Packet Error in Field: %d\n",check);
             rej(out->clientid,out->segnum,check,sockfd,clientaddr);
             break;
-        }else if(check == 5){
-            printf("Packet Error in Field: %d\n",check);
-            rej(out->clientid,out->segnum,check,sockfd,clientaddr);
-            break;
-        }else if(check == 7){
+        }else if(check == REJSUB3){
             printf("Packet Error in Field: %d\n",check);
             rej(out->clientid,out->segnum,check,sockfd,clientaddr);
             break;
         }
 
-        //Check error in segment number
-        if(out->segnum != count+1){
-            printf("Packet Error in Field 4\n");
-            rej(out->clientid,out->segnum,4,sockfd,clientaddr);
+        if(count == 0){
+            clientid = out->clientid;
+        }
+
+        //Check error in segment number for duplicate first then for out of order.
+        if(out->segnum == lastsegnum){
+            printf("Duplicate Packet\n");
+            rej(out->clientid,out->segnum,REJSUB4,sockfd,clientaddr);
             break;
-        };
+        }else if(out->segnum != lastsegnum+1){
+            printf("Packet Received out of order.\nLast %d\nCurrent %d\n",lastsegnum,out->segnum);
+            rej(out->clientid,out->segnum,REJSUB1,sockfd,clientaddr);
+            break;
+        }
+
+        //Check to ensure  receiving from proper Client
+        if(out->clientid != clientid){
+            printf("Client ID mismatch\n");
+            rej(out->clientid,out->segnum,2,sockfd,clientaddr);
+            break;
+        }
 
 
         //Check packet values by eye. Printed in decimal
@@ -191,15 +223,32 @@ int main(void)
 
         ack(out->clientid,out->segnum,sockfd,clientaddr);
 
+        //build message as it comes
+        while(i < out->len){
+            buf1[i + bufcount] = out->payload[i];
+            i++;
+        }
+
+        if(out->len < MAXPAY){
+            printf("Message length %d\n", strlen(buf1));
+            printf("Message: %s\n",buf1);
+            break;
+        }
+
+        //loop resets
+        bufcount += i;
+        i = 0;
         count++;
         memset(out->payload,0,sizeof(out->payload));
+        lastsegnum = out->segnum;
 
         //LOOP END
 
     }
 
 
-    //close the socket
+    //close the socket, free memory
+    free(out);
     close(sockfd);
     return 0;
 
@@ -255,14 +304,13 @@ int deserialize_data(datapack *pack, char buffer[])
     //Get the payload
     while(i<MAXPAY){
         pack->payload[i] = buffer[7+i];
-        printf("pack.payload[i] %c\n",pack->payload[i]);
         i++;
     };
 
     //Check payload length
     ex1 = pack->len;
     if(pack->payload[ex1] != '\0'){
-        return 5;
+        return REJSUB2;
     }
 
 
@@ -273,7 +321,7 @@ int deserialize_data(datapack *pack, char buffer[])
     else{
         pack->endid = buffer[8+MAXPAY] + buffer[9+MAXPAY];
         if(pack->endid != end){
-            return 7;
+            return REJSUB3;
         }
     }
 
