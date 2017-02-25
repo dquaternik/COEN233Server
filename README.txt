@@ -1,1 +1,1 @@
-Server for COEN 233 programming assingment 1
+Verification server for COEN 233 programming assingment 2
