@@ -13,7 +13,7 @@
 //Port to connect to
 #define PORT "1337"
 #define MAXPAY 5
-#define MAXBUFLEN 16 //packets worth of data
+#define MAXBUFLEN 15 //packets worth of data
 #define STARTID 0xffff
 #define ENDID 0xffff
 #define ACCPER 0xfff8
@@ -30,9 +30,16 @@ typedef struct packet {
     unsigned char segnum;
     unsigned char len;
     unsigned char tech;
-    unsigned long ssnum;
+    unsigned int ssnum;
     unsigned short endid;
 } packet;
+
+typedef struct dbpack {
+    unsigned long ssnum;
+    unsigned char tech;
+    unsigned char paid;
+}dbpack;
+
 
 //Buffer definition
 typedef struct databuf {
@@ -43,14 +50,15 @@ typedef struct databuf {
 
 //Function Definitions
 void *get_addr(struct sockaddr *sa);
-packet *create_pack(short mess, char client, char tec, long ssn);
+packet *create_pack(short mess, unsigned char client, unsigned char tec, unsigned long ssn);
 int deserialize(packet *pack, char buffer[]);
 void serialize_pack(packet pack, packbuff *b);
 void serialize_short(short x, packbuff *b);
 void serialize_char(char x, packbuff *b);
-void serialize_long(long x, packbuff *b);
+void serialize_int(int x, packbuff *b);
 packbuff *new_buffer();
-
+int checkdb(FILE *db,long ssn, char tech);
+void deserialize_db(dbpack db,char buf[]);
 
 int main(void)
 {
@@ -68,11 +76,20 @@ int main(void)
     packet *resp = malloc(sizeof(packet));
     packbuff *respbuf = new_buffer();
 
+
     /*
      *
      * CREATE DATABASE FILE HERE
      *
      */
+    FILE *db;
+
+    db = fopen("C:\\Users\\Devon\\CLionProjects\\PA2Serv\\database.txt","r");
+    if(db == NULL){
+        perror("Database Error");
+        exit(-1);
+    }
+
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET; //IPv4
@@ -138,6 +155,18 @@ int main(void)
 
     //Setup for deserialization
     check = deserialize(out,buf);
+
+    //Check packet values by eye. Printed in decimal
+    printf("start: %d\n",out->startid);
+    printf("client: %d\n",out->clientid);
+    printf("Message: %d\n",out->mess);
+    printf("Segnum: %d\n",out->segnum);
+    printf("len: %d\n",out->len);
+    printf("tech: %d\n",out->tech);
+    printf("SSNUM: %d\n",out->ssnum);
+    printf("end: %d\n",out->endid);
+
+
     if(check != 0){
         perror("Error in received packet");
         exit(-check);
@@ -149,19 +178,12 @@ int main(void)
 
     };
 
-    //Check packet values by eye. Printed in decimal
-    printf("start: %d\n",out->startid);
-    printf("client: %d\n",out->clientid);
-    printf("data: %d\n",out->mess);
-    printf("Segnum: %d\n",out->segnum);
-    printf("len: %d\n",out->len);
-    printf("tech: %d\n",out->tech);
-    printf("SSNUM: %d\n",out->ssnum);
-    printf("end: %d\n",out->endid);
+
 
 
     //Check the database, returns a value of PAID, NPAID, DNE, or -1 for general error
-    check = checkdb(db,ssn,tech);
+    check = checkdb(db,out->ssnum,out->tech);
+    printf("check: %d\n",check);
     //create response packet based on database check
     resp = create_pack(check,out->clientid,out->tech,out->ssnum);
     serialize_pack(*resp,respbuf);
@@ -194,6 +216,7 @@ void *get_addr(struct sockaddr *sa)
 int deserialize(packet *pack, char buffer[]){
     int end = ENDID;
     int ex1;
+    char buf1[MAXPAY];
 
     //Checks that the first two bytes are ff. Due to adding overflows in chars, adding both would result in 0xfffe
     if((u_char) buffer[0] == 0xff && (u_char) buffer[1] == 0xff){
@@ -242,10 +265,20 @@ int deserialize(packet *pack, char buffer[]){
 
     //Get the payload
     pack->tech = buffer[7];
-    pack->ssnum = buffer[8] + buffer[9] + buffer[10] +buffer[11];
+
+    pack->ssnum = (u_char) buffer[11];
+    pack->ssnum <<= 8;
+    pack->ssnum |= (u_char) buffer[10];
+    pack->ssnum <<= 8;
+    pack->ssnum |= (u_char) buffer[9];
+    pack->ssnum <<= 8;
+    pack->ssnum |= (u_char) buffer[8];
+
+
+    printf("ssnum %d",pack->ssnum);
 
     //Check payload length
-    ex1 = sizeof(pack->tech)+pack->ssnum;
+    ex1 = sizeof(pack->tech)+sizeof(pack->ssnum);
     if(pack->len != ex1){
         return 5;
     }
@@ -278,20 +311,9 @@ packbuff *new_buffer(){
     return b;
 };
 
-//Serialize packet
-void serialize_pack(packet pack, packbuff *b){
-    serialize_short(pack.startid,b);
-    serialize_char(pack.clientid,b);
-    serialize_long(pack.mess,b);
-    serialize_char(pack.segnum,b);
-    serialize_char(pack.len,b);
-    serialize_char(pack.tech,b);
-    serialize_long(pack.ssnum,b);
-    serialize_short(pack.endid,b);
-};
 
 //Create response packet
-packet *create_pack(short mess, char client, char tec, long ssn) {
+packet *create_pack(short mess, unsigned char client, unsigned char tec, unsigned long ssn) {
     int nsegs = 1; //Only need 1 segment, this is only a verification server
     packet *sendpack = malloc(sizeof(packet));
 
@@ -312,9 +334,22 @@ packet *create_pack(short mess, char client, char tec, long ssn) {
     return sendpack;
 }
 
+//Serialize packet
+void serialize_pack(packet pack, packbuff *b){
+    serialize_short(pack.startid,b);
+    serialize_char(pack.clientid,b);
+    serialize_short(pack.mess,b);
+    serialize_char(pack.segnum,b);
+    serialize_char(pack.len,b);
+    serialize_char(pack.tech,b);
+    serialize_int(pack.ssnum,b);
+    serialize_short(pack.endid,b);
+
+};
+
+
 //Serialize by data size
 void serialize_short(short x, packbuff *b) {
-    //reserve(b, sizeof(short));
     memcpy(((char *)b->data) + b->next, &x, sizeof(short));
     b->next += sizeof(short);
 };
@@ -326,7 +361,46 @@ void serialize_char(char x, packbuff *b) {
     b->next += sizeof(char);
 };
 
-void serialize_long(long x, packbuff *b){
-    memcpy(((char *)b->data) + b->next, &x,sizeof(long));
-    b->next += sizeof(char);
+void serialize_int(int x, packbuff *b){
+    memcpy(((char *)b->data) + b->next, &x,sizeof(int));
+    b->next += sizeof(int);
+};
+
+//Check the database if subscriber exists, if their technology is allowed, and if they're paid
+int checkdb(FILE *db,long ssn, char tech){
+    int check = 0;
+    int buflen = 15;
+    char buf[buflen];
+    dbpack *dbln;
+
+    //check db line by line to get ssn
+    while(check != -1){
+        check = getline(&buf,buflen,db);
+        deserialize_db(*dbln,buf);
+        if(dbln->ssnum == ssn){
+            break;
+        }
+    }
+
+    if(dbln->ssnum != ssn){
+        return DNE;
+    }
+
+    if(dbln->tech != tech){
+        return -1;
+    }
+
+    return dbln->paid;
+
+};
+
+//deserialize the buffer into a dbln packet
+void deserialize_db(dbpack db,char buf[]){
+
+    for(int i = 0; i<10;i++){
+        db.ssnum += (buf[i]-'0');
+    }
+    db.tech = buf[12]-'0';
+    db.paid = buf[14]-'0';
+
 };
