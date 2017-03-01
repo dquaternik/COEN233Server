@@ -77,11 +77,7 @@ int main(void)
     packbuff *respbuf = new_buffer();
 
 
-    /*
-     *
-     * CREATE DATABASE FILE HERE
-     *
-     */
+   //Create db pointer
     FILE *db;
 
     db = fopen("C:\\Users\\Devon\\CLionProjects\\PA2Serv\\database.txt","r");
@@ -311,7 +307,7 @@ packbuff *new_buffer(){
 
 //Create response packet
 packet *create_pack(unsigned short mess, unsigned char client, unsigned char tec, unsigned int ssn) {
-    int nsegs = 1; //Only need 1 segment, this is only a verification server
+    const int nsegs = 1; //Only need 1 segment, this is only a verification server
     packet *sendpack = malloc(sizeof(packet));
 
     //initialize all the constant data
