@@ -35,7 +35,7 @@ typedef struct packet {
 } packet;
 
 typedef struct dbpack {
-    unsigned long ssnum;
+    unsigned int ssnum;
     unsigned char tech;
     unsigned char paid;
 }dbpack;
@@ -50,15 +50,15 @@ typedef struct databuf {
 
 //Function Definitions
 void *get_addr(struct sockaddr *sa);
-packet *create_pack(short mess, unsigned char client, unsigned char tec, unsigned long ssn);
+packet *create_pack(unsigned short mess, unsigned char client, unsigned char tec, unsigned int ssn);
 int deserialize(packet *pack, char buffer[]);
 void serialize_pack(packet pack, packbuff *b);
 void serialize_short(short x, packbuff *b);
 void serialize_char(char x, packbuff *b);
 void serialize_int(int x, packbuff *b);
 packbuff *new_buffer();
-int checkdb(FILE *db,long ssn, char tech);
-void deserialize_db(dbpack db,char buf[]);
+int checkdb(FILE *db,unsigned int ssn,unsigned char tech);
+void deserialize_db(dbpack *db,char buf[]);
 
 int main(void)
 {
@@ -73,7 +73,7 @@ int main(void)
     socklen_t addr_len;
     char s[INET_ADDRSTRLEN];
     packet *out = malloc(sizeof(packet));
-    packet *resp = malloc(sizeof(packet));
+    packet *resp;
     packbuff *respbuf = new_buffer();
 
 
@@ -146,7 +146,7 @@ int main(void)
 
     //Print who sent the data (here 127.0.0.1 because it is the localhost machine)
     printf("listener: got packet from %s\n",
-           inet_ntop(clientaddr.sin_family, get_addr((struct sockaddr *)&clientaddr), s, sizeof(s)));
+          inet_ntop(clientaddr.sin_family, get_addr((struct sockaddr *)&clientaddr), s, sizeof(s)));
     printf("Address family %d\n", clientaddr.sin_family);
 
     //Print how long the packet is
@@ -157,13 +157,13 @@ int main(void)
     check = deserialize(out,buf);
 
     //Check packet values by eye. Printed in decimal
-    printf("start: %d\n",out->startid);
-    printf("client: %d\n",out->clientid);
-    printf("Message: %d\n",out->mess);
-    printf("Segnum: %d\n",out->segnum);
-    printf("len: %d\n",out->len);
-    printf("tech: %d\n",out->tech);
-    printf("SSNUM: %d\n",out->ssnum);
+    printf("start: %u\n",out->startid);
+    printf("client: %u\n",out->clientid);
+    printf("Message: %u\n",out->mess);
+    printf("Segnum: %u\n",out->segnum);
+    printf("len: %u\n",out->len);
+    printf("tech: %u\n",out->tech);
+    printf("SSNUM: %u\n",out->ssnum);
     printf("end: %d\n",out->endid);
 
 
@@ -185,7 +185,7 @@ int main(void)
     check = checkdb(db,out->ssnum,out->tech);
     printf("check: %d\n",check);
     //create response packet based on database check
-    resp = create_pack(check,out->clientid,out->tech,out->ssnum);
+    resp = create_pack((unsigned short)check,out->clientid,out->tech,out->ssnum);
     serialize_pack(*resp,respbuf);
 
     //send the response
@@ -274,9 +274,6 @@ int deserialize(packet *pack, char buffer[]){
     pack->ssnum <<= 8;
     pack->ssnum |= (u_char) buffer[8];
 
-
-    printf("ssnum %d",pack->ssnum);
-
     //Check payload length
     ex1 = sizeof(pack->tech)+sizeof(pack->ssnum);
     if(pack->len != ex1){
@@ -295,7 +292,7 @@ int deserialize(packet *pack, char buffer[]){
         }
     }
 
-    printf("completed deserialize");
+    printf("completed deserialize\n");
     return 0;
 
 };
@@ -313,7 +310,7 @@ packbuff *new_buffer(){
 
 
 //Create response packet
-packet *create_pack(short mess, unsigned char client, unsigned char tec, unsigned long ssn) {
+packet *create_pack(unsigned short mess, unsigned char client, unsigned char tec, unsigned int ssn) {
     int nsegs = 1; //Only need 1 segment, this is only a verification server
     packet *sendpack = malloc(sizeof(packet));
 
@@ -367,16 +364,18 @@ void serialize_int(int x, packbuff *b){
 };
 
 //Check the database if subscriber exists, if their technology is allowed, and if they're paid
-int checkdb(FILE *db,long ssn, char tech){
+int checkdb(FILE *db,unsigned int ssn,unsigned char tech){
     int check = 0;
-    int buflen = 15;
-    char buf[buflen];
-    dbpack *dbln;
+    int buflen = 0;
+    char *buf=NULL;
+    dbpack *dbln = malloc(sizeof(dbpack));
 
     //check db line by line to get ssn
     while(check != -1){
-        check = getline(&buf,buflen,db);
-        deserialize_db(*dbln,buf);
+        check = getline(&buf,&buflen,db);
+        printf("line: %s\n",buf);
+        deserialize_db(dbln,buf);
+        printf("dbln->ssnum = %u\n",dbln->ssnum);
         if(dbln->ssnum == ssn){
             break;
         }
@@ -384,23 +383,32 @@ int checkdb(FILE *db,long ssn, char tech){
 
     if(dbln->ssnum != ssn){
         return DNE;
-    }
-
-    if(dbln->tech != tech){
+    }if(dbln->tech != tech){
         return -1;
+    }if(dbln->paid == 1){
+        return PAID;
+    }else {
+        return NPAID;
     }
-
-    return dbln->paid;
 
 };
 
 //deserialize the buffer into a dbln packet
-void deserialize_db(dbpack db,char buf[]){
+void deserialize_db(dbpack *db,char buf[]){
 
+    char ex[11];
     for(int i = 0; i<10;i++){
-        db.ssnum += (buf[i]-'0');
+        ex[i] = buf[i];
     }
-    db.tech = buf[12]-'0';
-    db.paid = buf[14]-'0';
+    ex[10] = '\0';
+
+    db->ssnum = atoi(ex);
+    printf("db.ssnum: %u\n",db->ssnum);
+
+
+    db->tech = buf[12]-'0';
+    printf("db.tech: %u\n",db->tech);
+    db->paid = buf[14]-'0';
+    printf("db.paid: %u\n",db->paid);
 
 };
