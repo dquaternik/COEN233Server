@@ -82,7 +82,7 @@ int main(void)
 
     db = fopen("C:\\Users\\Devon\\CLionProjects\\PA2Serv\\database.txt","r");
     if(db == NULL){
-        perror("Database Error");
+        perror("Database Error\n");
         exit(-1);
     }
 
@@ -104,14 +104,14 @@ int main(void)
     {
         if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1)
         {
-            perror("Listener Socket Error");
+            perror("Socket Error\n");
             continue;
         }
 
         if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1)
         {
             close(sockfd);
-            perror("Listener Binding Error");
+            perror("Binding Error\n");
             continue;
         }
 
@@ -141,12 +141,12 @@ int main(void)
 
 
     //Print who sent the data (here 127.0.0.1 because it is the localhost machine)
-    printf("listener: got packet from %s\n",
+    printf("Got packet from %s\n",
           inet_ntop(clientaddr.sin_family, get_addr((struct sockaddr *)&clientaddr), s, sizeof(s)));
     printf("Address family %d\n", clientaddr.sin_family);
 
     //Print how long the packet is
-    printf("listener: packet is %d bytes long\n", numbytes);
+    printf("Packet is %d bytes long\n", numbytes);
     buf[numbytes] = '\0';
 
     //Setup for deserialization
@@ -164,7 +164,7 @@ int main(void)
 
 
     if(check != 0){
-        perror("Error in received packet");
+        perror("Error in received packet\n");
         exit(-check);
     }
 
@@ -371,7 +371,6 @@ int checkdb(FILE *db,unsigned int ssn,unsigned char tech){
         check = getline(&buf,&buflen,db);
         printf("line: %s\n",buf);
         deserialize_db(dbln,buf);
-        printf("dbln->ssnum = %u\n",dbln->ssnum);
         if(dbln->ssnum == ssn){
             break;
         }
@@ -380,7 +379,7 @@ int checkdb(FILE *db,unsigned int ssn,unsigned char tech){
     if(dbln->ssnum != ssn){
         return DNE;
     }if(dbln->tech != tech){
-        return -1;
+        return 4;
     }if(dbln->paid == 1){
         return PAID;
     }else {
@@ -399,12 +398,7 @@ void deserialize_db(dbpack *db,char buf[]){
     ex[10] = '\0';
 
     db->ssnum = atoi(ex);
-    printf("db.ssnum: %u\n",db->ssnum);
-
-
     db->tech = buf[12]-'0';
-    printf("db.tech: %u\n",db->tech);
     db->paid = buf[14]-'0';
-    printf("db.paid: %u\n",db->paid);
 
 };
