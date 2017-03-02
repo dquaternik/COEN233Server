@@ -12,9 +12,9 @@
 
 //Port to connect to
 #define PORT "1337"
-#define MAXPAY 255
-#define MAXBUFLEN 1275 //5 packets worth of data
-#define STARTID 0xffff
+#define MAXPAY 0xff     //255
+#define MAXBUFLEN 1276  //5 packets
+#define STARTID 0xffff  //The following are as defined in the assignment
 #define ENDID 0xffff
 #define DATA 0xfff1
 #define ACK 0xfff2
@@ -24,7 +24,7 @@
 #define REJSUB3 0xfff6
 #define REJSUB4 0xfff7
 
-//Define packet structures
+//Define packet structures (one of each due to different size requirements
 typedef struct datapack {
     unsigned short startid;
     unsigned char clientid;
@@ -53,7 +53,7 @@ typedef struct rejpack {
     unsigned short endid;
 }rejpack;
 
-//Buffer definitions
+//Buffer structure
 typedef struct databuf {
     void *data;
     int next;
@@ -68,17 +68,17 @@ databuf *new_rejbuf();
 int ack(char client, char segnum, int sockfd, struct sockaddr_in theiraddr);
 int rej(char client,char segnum, char sub, int sockfd, struct sockaddr_in theiraddr);
 void serialize_ack(ackpack pack, databuf *b);
+void serialize_rej(rejpack pack, databuf *b);
 void serialize_short(short x, databuf *b);
 void serialize_char(char x, databuf *b);
 
 int main(void)
 {
     //Variable declarations
-    int sockfd, hostp;
+    int sockfd;
     struct addrinfo hints, *servinfo, *p; //Each is a separate struct. Hints is constant for network. Servinfo is address of server. *p is for buffer
     int ex1; //extra variable for error check
     int numbytes;
-    struct sockaddr_storage their_addr;
     struct sockaddr_in clientaddr;
     struct pollfd fd;
     unsigned char buf[MAXBUFLEN], buf1[MAXBUFLEN];
@@ -88,6 +88,7 @@ int main(void)
     int count = 0, lastsegnum = 0, i = 0, bufcount = 0;
     int clientid, check, res;
 
+    //Create info about the server
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET; //IPv4
     hints.ai_socktype = SOCK_DGRAM; //UDP
@@ -96,7 +97,7 @@ int main(void)
     //Error Checking to ensure network setup is correct and server matches.
     if((ex1 = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0)
     {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(ex1));
+        fprintf(stderr, "Getaddrinfo: %s\n", gai_strerror(ex1));
         return 1;
     }
 
@@ -105,23 +106,24 @@ int main(void)
     {
         if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1)
         {
-            perror("Listener Socket Error");
+            perror("Socket Error\n");
             continue;
         }
 
         if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1)
         {
             close(sockfd);
-            perror("Listener Binding Error");
+            perror("Socket failed to bind\n");
             continue;
         }
 
         break;
     }
 
+    //Error checking
     if (p == NULL)
     {
-        fprintf(stderr, "Listener failed to bind to socket.\n");
+        fprintf(stderr, "p failed to create socket from servinfo.\n");
         return 2;
     }
     //Setup polling
@@ -132,17 +134,14 @@ int main(void)
     freeaddrinfo(servinfo);
 
     //LOOP START
-
-
     while(1) {
         //Start 'listening'
         printf("Listener waiting to receive...\n");
 
 
-        //Poll for 5 minutes. If no contact in that time break the loop.
+        //Poll for 5 minutes. If no contact in that time break the loop and turn off the server.
         res = poll(&fd,1,300000);
         addr_len = sizeof(clientaddr);
-
         if(res == 0){
             //timeout
             //break loop to close socket and free ip
@@ -153,10 +152,11 @@ int main(void)
             perror("Poll Error");
             exit(1);
         } else {
-            //Receive something and ensure it is something
-            if((numbytes = recvfrom(sockfd, buf, MAXBUFLEN-1, 0, (struct sockaddr *)&clientaddr, &addr_len)) == -1)
+            //Receive something and error check it exists
+            numbytes = recvfrom(sockfd, buf, MAXBUFLEN-1, 0, (struct sockaddr *)&clientaddr, &addr_len);
+            if(numbytes == -1)
             {
-                perror("Nothing received");
+                perror("Recvfrom error\n");
                 exit(1);
             }
         }
@@ -164,16 +164,13 @@ int main(void)
 
 
 
-        //Print who sent the data (here 127.0.0.1 because it is the localhost machine)
-        printf("listener: got packet from %s\n",
+        //Print who sent the data and its address family (here 127.0.0.1 because it is the localhost machine)
+        printf("Received packet from %s\n",
                inet_ntop(clientaddr.sin_family, get_addr((struct sockaddr *)&clientaddr), s, sizeof(s)));
         printf("Address family %d\n", clientaddr.sin_family);
 
-        //Print how long the packet is
-        printf("listener: packet is %d bytes long\n", numbytes);
-        buf[numbytes] = '\0';
 
-        //Setup for deserialization
+        //Deserialize and send rej packet if any errors detected
         check = deserialize_data(out,buf);
         if(check == 1){
             printf("Packet Error in Field: %d\n",check);
@@ -189,6 +186,7 @@ int main(void)
             break;
         }
 
+        //If receiving the first packet,
         if(count == 0){
             clientid = out->clientid;
         }
@@ -212,15 +210,14 @@ int main(void)
         }
 
 
-        //Check packet values by eye. Printed in decimal
-        printf("start: %d\n",out->startid);
-        printf("client: %d\n",out->clientid);
-        printf("data: %d\n",out->data);
+        //Check packet values by eye except for . Printed in hex where appropriate.
+        printf("start: %x\n",out->startid);
+        printf("client: %x\n",out->clientid);
         printf("Segnum: %d\n",out->segnum);
         printf("len: %d\n",out->len);
-        printf("end: %d\n",out->endid);
+        printf("end: %x\n",out->endid);
 
-
+        //If no errors are thrown, ACK is sent.
         ack(out->clientid,out->segnum,sockfd,clientaddr);
 
         //build message as it comes
@@ -229,6 +226,7 @@ int main(void)
             i++;
         }
 
+        //Print the buffer after the last packet is received
         if(out->len < MAXPAY){
             printf("Message length %d\n", strlen(buf1));
             printf("Message: %s\n",buf1);
@@ -243,7 +241,6 @@ int main(void)
         lastsegnum = out->segnum;
 
         //LOOP END
-
     }
 
 
@@ -255,20 +252,16 @@ int main(void)
 }
 
 //gets an address to use
-void *get_addr(struct sockaddr *sa)
-{
+void *get_addr(struct sockaddr *sa) {
     //returns address of the socket
     return &(((struct sockaddr_in*)sa)->sin_addr);
 }
 
 //Gets data out of the packet and error checks to ensure packet follows proper structure.
-int deserialize_data(datapack *pack, char buffer[])
-{
+int deserialize_data(datapack *pack, char buffer[]) {
     int end = ENDID;
     int i = 0;
     int ex1;
-    //Error checking line
-    //printf("buff[2] = %d buff[5] = %d\n",(u_char) buffer[2],(u_char) buffer[5]);
 
     //Checks that the first two bytes are ff. Due to adding overflows in chars, adding both would result in 0xfffe
     if((u_char) buffer[0] == 0xff && (u_char) buffer[1] == 0xff){
@@ -325,12 +318,12 @@ int deserialize_data(datapack *pack, char buffer[])
         }
     }
 
-    printf("completed deserialize");
+    printf("Completed deserialize\n");
     return 0;
 
 };
 
-//buffer initilizations
+//Packet buffer initilizations. Returns appropriate size buffer depending on packet type used
 databuf *new_ackbuf(){
     databuf *b = malloc(sizeof(ackpack)*2);
 
@@ -349,6 +342,7 @@ databuf *new_rejbuf(){
     b->next = 0;
 }
 
+//Creates and send the ACK packet for the server
 int ack(char client, char segnum, int sockfd, struct sockaddr_in theiraddr){
 
     ackpack *pack = malloc(sizeof(ackpack));
@@ -377,6 +371,7 @@ int ack(char client, char segnum, int sockfd, struct sockaddr_in theiraddr){
 
 };
 
+//Creates and sends the REJ packet for the server, including the subcode
 int rej(char client,char segnum, char sub, int sockfd, struct sockaddr_in theiraddr) {
 
     rejpack *pack = malloc(sizeof(rejpack));
@@ -404,6 +399,7 @@ int rej(char client,char segnum, char sub, int sockfd, struct sockaddr_in theira
     free(packbuff);
 };
 
+//Serialize according to packet size
 void serialize_ack(ackpack pack, databuf *b){
     serialize_short(pack.startid,b);
     serialize_char(pack.clientid,b);
@@ -422,10 +418,13 @@ void serialize_rej(rejpack pack, databuf *b){
 
 };
 
+//Serialize by data type. Takes one piece of data of a given and a buffer.
+//Places the data in the next spot and increments the location according to the size
 void serialize_short(short x, databuf *b){
     memcpy(((char *)b->data) + b->next, &x, sizeof(short));
     b->next += sizeof(short);
 };
+
 void serialize_char(char x, databuf *b){
     memcpy(((char *)b->data)+ b->next,&x,sizeof(char));
     b->next += sizeof(char);
