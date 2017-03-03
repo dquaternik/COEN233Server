@@ -1,4 +1,4 @@
-//Written to build an IPv4 Network Permission Verification Server
+//Written to build an IPv4 Server
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,81 +12,83 @@
 
 //Port to connect to
 #define PORT "1337"
-#define MAXPAY 5
-#define MAXBUFLEN 15 //packets worth of data
-#define STARTID 0xffff
+#define MAXPAY 0xff     //255
+#define MAXBUFLEN 1276  //5 packets
+#define STARTID 0xffff  //The following are as defined in the assignment
 #define ENDID 0xffff
-#define ACCPER 0xfff8
-#define NPAID 0xfff9
-#define DNE 0xfffa
-#define PAID 0xfffb
+#define DATA 0xfff1
+#define ACK 0xfff2
+#define REJECT 0xfff3
+#define REJSUB1 0xfff4
+#define REJSUB2 0xfff5
+#define REJSUB3 0xfff6
+#define REJSUB4 0xfff7
 
-
-//Define packet structures
-typedef struct packet {
+//Define packet structures (one of each due to different size requirements
+typedef struct datapack {
     unsigned short startid;
     unsigned char clientid;
-    unsigned short mess;
+    unsigned short data;
     unsigned char segnum;
     unsigned char len;
-    unsigned char tech;
-    unsigned int ssnum;
+    unsigned char payload[MAXPAY];
     unsigned short endid;
-} packet;
+    struct datapack *next;
+}datapack;
 
-typedef struct dbpack {
-    unsigned int ssnum;
-    unsigned char tech;
-    unsigned char paid;
-}dbpack;
+typedef struct ackpack {
+    unsigned short startid;
+    unsigned char clientid;
+    unsigned short ack;
+    unsigned char segnum;
+    unsigned short endid;
+}ackpack;
 
+typedef struct rejpack {
+    unsigned short startid;
+    unsigned char clientid;
+    unsigned short reject;
+    unsigned short subc;
+    unsigned char segnum;
+    unsigned short endid;
+}rejpack;
 
-//Buffer definition
+//Buffer structure
 typedef struct databuf {
     void *data;
     int next;
     size_t size;
-}packbuff;
+}databuf;
 
 //Function Definitions
 void *get_addr(struct sockaddr *sa);
-packet *create_pack(unsigned short mess, unsigned char client, unsigned char tec, unsigned int ssn);
-int deserialize(packet *pack, char buffer[]);
-void serialize_pack(packet pack, packbuff *b);
-void serialize_short(short x, packbuff *b);
-void serialize_char(char x, packbuff *b);
-void serialize_int(int x, packbuff *b);
-packbuff *new_buffer();
-int checkdb(FILE *db,unsigned int ssn,unsigned char tech);
-void deserialize_db(dbpack *db,char buf[]);
+int deserialize_data(datapack *data, char buffer[]);
+databuf *new_ackbuf();
+databuf *new_rejbuf();
+int ack(char client, char segnum, int sockfd, struct sockaddr_in theiraddr);
+int rej(char client,char segnum, char sub, int sockfd, struct sockaddr_in theiraddr);
+void serialize_ack(ackpack pack, databuf *b);
+void serialize_rej(rejpack pack, databuf *b);
+void serialize_short(short x, databuf *b);
+void serialize_char(char x, databuf *b);
 
 int main(void)
 {
     //Variable declarations
-    int sockfd, hostp;
+    int sockfd;
     struct addrinfo hints, *servinfo, *p; //Each is a separate struct. Hints is constant for network. Servinfo is address of server. *p is for buffer
-    int ex1, check; //extra variable for error check
+    int ex1; //extra variable for error check
     int numbytes;
-    struct sockaddr_storage their_addr;
     struct sockaddr_in clientaddr;
-    unsigned char buf[MAXBUFLEN];
+    struct pollfd fd;
+    unsigned char buf[MAXBUFLEN], buf1[MAXBUFLEN];
     socklen_t addr_len;
     char s[INET_ADDRSTRLEN];
-    packet *out = malloc(sizeof(packet));
-    packet *resp;
-    packbuff *respbuf = new_buffer();
+    datapack *out = malloc(sizeof(datapack));
+    int count = 0, lastsegnum = 0, i = 0, bufcount = 0;
+    int clientid, check, res;
 
-
-   //Create db pointer
-    FILE *db;
-
-    db = fopen("C:\\Users\\Devon\\CLionProjects\\PA2Serv\\database.txt","r");
-    if(db == NULL){
-        perror("Database Error\n");
-        exit(-1);
-    }
-
-
+    //Create info about the server
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET; //IPv4
     hints.ai_socktype = SOCK_DGRAM; //UDP
@@ -95,7 +97,7 @@ int main(void)
     //Error Checking to ensure network setup is correct and server matches.
     if((ex1 = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0)
     {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(ex1));
+        fprintf(stderr, "Getaddrinfo: %s\n", gai_strerror(ex1));
         return 1;
     }
 
@@ -111,108 +113,155 @@ int main(void)
         if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1)
         {
             close(sockfd);
-            perror("Binding Error\n");
+            perror("Socket failed to bind\n");
             continue;
         }
 
         break;
     }
 
+    //Error checking
     if (p == NULL)
     {
-        fprintf(stderr, "Listener failed to bind to socket.\n");
+        fprintf(stderr, "p failed to create socket from servinfo.\n");
         return 2;
     }
+    //Setup polling
+    fd.fd = sockfd;
+    fd.events = POLLIN;
 
     //release memory for server info (only needed for error checking)
     freeaddrinfo(servinfo);
 
-    //Start 'listening'
-    printf("Listener waiting to receive...\n");
+    //LOOP START
+    while(1) {
+        //Start 'listening'
+        printf("Listener waiting to receive...\n");
 
 
-    addr_len = sizeof(clientaddr);
-    //Receive something and ensure it is something
-    if((numbytes = recvfrom(sockfd, buf, MAXBUFLEN-1, 0, (struct sockaddr *)&clientaddr, &addr_len)) == -1)
-    {
-        perror("Nothing received");
-        exit(1);
+        //Poll for 5 minutes. If no contact in that time break the loop and turn off the server.
+        res = poll(&fd,1,300000);
+        addr_len = sizeof(clientaddr);
+        if(res == 0){
+            //timeout
+            //break loop to close socket and free ip
+            break;
+
+        } else if(res == -1){
+            //error
+            perror("Poll Error");
+            exit(1);
+        } else {
+            //Receive something and error check it exists
+            numbytes = recvfrom(sockfd, buf, MAXBUFLEN-1, 0, (struct sockaddr *)&clientaddr, &addr_len);
+            if(numbytes == -1)
+            {
+                perror("Recvfrom error\n");
+                exit(1);
+            }
+        }
+
+
+
+
+        //Print who sent the data and its address family (here 127.0.0.1 because it is the localhost machine)
+        printf("Received packet from %s\n",
+               inet_ntop(clientaddr.sin_family, get_addr((struct sockaddr *)&clientaddr), s, sizeof(s)));
+        printf("Address family %d\n", clientaddr.sin_family);
+
+
+        //Deserialize and send rej packet if any errors detected
+        check = deserialize_data(out,buf);
+        if(check == 1){
+            printf("Packet Error in Field: %d\n",check);
+            rej(out->clientid,out->segnum,check,sockfd,clientaddr);
+            break;
+        } else if(check == REJSUB2){
+            printf("Packet Error in Field: %d\n",check);
+            rej(out->clientid,out->segnum,check,sockfd,clientaddr);
+            break;
+        }else if(check == REJSUB3){
+            printf("Packet Error in Field: %d\n",check);
+            rej(out->clientid,out->segnum,check,sockfd,clientaddr);
+            break;
+        }
+
+        //If receiving the first packet,
+        if(count == 0){
+            clientid = out->clientid;
+        }
+
+        //Check error in segment number for duplicate first then for out of order.
+        if(out->segnum == lastsegnum){
+            printf("Duplicate Packet\n");
+            rej(out->clientid,out->segnum,REJSUB4,sockfd,clientaddr);
+            break;
+        }else if(out->segnum != lastsegnum+1){
+            printf("Packet Received out of order.\nLast %d\nCurrent %d\n",lastsegnum,out->segnum);
+            rej(out->clientid,out->segnum,REJSUB1,sockfd,clientaddr);
+            break;
+        }
+
+        //Check to ensure  receiving from proper Client
+        if(out->clientid != clientid){
+            printf("Client ID mismatch\n");
+            rej(out->clientid,out->segnum,2,sockfd,clientaddr);
+            break;
+        }
+
+
+        //Check packet values by eye except for . Printed in hex where appropriate.
+        printf("start: %x\n",out->startid);
+        printf("client: %x\n",out->clientid);
+        printf("Segnum: %d\n",out->segnum);
+        printf("len: %d\n",out->len);
+        printf("end: %x\n",out->endid);
+
+        //If no errors are thrown, ACK is sent.
+        ack(out->clientid,out->segnum,sockfd,clientaddr);
+
+        //build message as it comes
+        while(i < out->len){
+            buf1[i + bufcount] = out->payload[i];
+            i++;
+        }
+
+        //Print the buffer after the last packet is received
+        if(out->len < MAXPAY){
+            printf("Message length %d\n", strlen(buf1));
+            printf("Message: %s\n",buf1);
+            break;
+        }
+
+        //loop resets
+        bufcount += i;
+        i = 0;
+        count++;
+        memset(out->payload,0,sizeof(out->payload));
+        lastsegnum = out->segnum;
+
+        //LOOP END
     }
 
 
-    //Print who sent the data (here 127.0.0.1 because it is the localhost machine)
-    printf("Got packet from %s\n",
-          inet_ntop(clientaddr.sin_family, get_addr((struct sockaddr *)&clientaddr), s, sizeof(s)));
-    printf("Address family %d\n", clientaddr.sin_family);
-
-    //Print how long the packet is
-    printf("Packet is %d bytes long\n", numbytes);
-    buf[numbytes] = '\0';
-
-    //Setup for deserialization
-    check = deserialize(out,buf);
-
-    //Check packet values by eye. Printed in decimal
-    printf("start: %u\n",out->startid);
-    printf("client: %u\n",out->clientid);
-    printf("Message: %u\n",out->mess);
-    printf("Segnum: %u\n",out->segnum);
-    printf("len: %u\n",out->len);
-    printf("tech: %u\n",out->tech);
-    printf("SSNUM: %u\n",out->ssnum);
-    printf("end: %d\n",out->endid);
-
-
-    if(check != 0){
-        perror("Error in received packet\n");
-        exit(-check);
-    }
-
-    //Check error in segment number
-    if(out->segnum != 1){
-        printf("Packet Segnum Error\n");
-
-    };
-
-
-
-
-    //Check the database, returns a value of PAID, NPAID, DNE, or -1 for general error
-    check = checkdb(db,out->ssnum,out->tech);
-    printf("check: %d\n",check);
-    //create response packet based on database check
-    resp = create_pack((unsigned short)check,out->clientid,out->tech,out->ssnum);
-    serialize_pack(*resp,respbuf);
-
-    //send the response
-    numbytes = sendto(sockfd, respbuf->data, respbuf->size, 0, (struct sockaddr *)&clientaddr, addr_len);
-    if(numbytes == -1)
-    {
-        perror("Ack Failed\n");
-        exit(1);
-    } else{
-        printf("Ack Sent\n");
-    }
-
-    //close the socket
+    //close the socket, free memory
+    free(out);
     close(sockfd);
     return 0;
 
-};
-
+}
 
 //gets an address to use
-void *get_addr(struct sockaddr *sa)
-{
+void *get_addr(struct sockaddr *sa) {
     //returns address of the socket
     return &(((struct sockaddr_in*)sa)->sin_addr);
 }
 
 //Gets data out of the packet and error checks to ensure packet follows proper structure.
-int deserialize(packet *pack, char buffer[]){
+int deserialize_data(datapack *pack, char buffer[]) {
     int end = ENDID;
+    int i = 0;
     int ex1;
-    char buf1[MAXPAY];
 
     //Checks that the first two bytes are ff. Due to adding overflows in chars, adding both would result in 0xfffe
     if((u_char) buffer[0] == 0xff && (u_char) buffer[1] == 0xff){
@@ -227,30 +276,16 @@ int deserialize(packet *pack, char buffer[]){
     //Clientid kept for later checks. Single packet are not able to be checked.
     pack->clientid = buffer[2];
 
-    //Checks message field for Acc_Per, Paid, Not Paid, or Does Not Exist
-    if((u_char) buffer[3] == 0xff && (u_char) buffer[4] == 0xf8
-       || (u_char) buffer[3] == 0xf8 && (u_char) buffer[4] == 0xff){
-
-        pack->mess = ACCPER;
-
-    } else if((u_char) buffer[3] == 0xff && (u_char) buffer[4] == 0xf9
-              || (u_char) buffer[3] == 0xf9 && (u_char) buffer[4] == 0xff){
-
-        pack->mess = NPAID;
-
-    } else if((u_char) buffer[3] == 0xff && (u_char) buffer[4] == 0xfa
-              || (u_char) buffer[3] == 0xfa && (u_char) buffer[4] == 0xff){
-
-        pack->mess = DNE;
-
-    }else if((u_char) buffer[3] == 0xff && (u_char) buffer[4] == 0xfb
-             || (u_char) buffer[3] == 0xfb && (u_char) buffer[4] == 0xff){
-
-        pack->mess = PAID;
-
-    } else {
-
-        pack->mess = buffer[3] + buffer[4];
+    //Checks for correct DATA field in the packet
+    if(((u_char) buffer[3] == 0xf1 && (u_char) buffer[4] == 0xff)
+            || ((u_char) buffer[3] == 0xff && (u_char) buffer[4] == 0xff1)){
+        pack->data = DATA;
+    }
+    else{
+        pack->data = buffer[4] + buffer[3];
+        if(pack->data != DATA){
+            return 3;
+        }
     }
 
     //Checks segment number. To ensure proper scope, must error check order outside of this function
@@ -260,145 +295,137 @@ int deserialize(packet *pack, char buffer[]){
     pack->len = buffer[6];
 
     //Get the payload
-    pack->tech = buffer[7];
-
-    pack->ssnum = (u_char) buffer[11];
-    pack->ssnum <<= 8;
-    pack->ssnum |= (u_char) buffer[10];
-    pack->ssnum <<= 8;
-    pack->ssnum |= (u_char) buffer[9];
-    pack->ssnum <<= 8;
-    pack->ssnum |= (u_char) buffer[8];
+    while(i<MAXPAY){
+        pack->payload[i] = buffer[7+i];
+        i++;
+    };
 
     //Check payload length
-    ex1 = sizeof(pack->tech)+sizeof(pack->ssnum);
-    if(pack->len != ex1){
-        return 5;
+    ex1 = pack->len;
+    if(pack->payload[ex1] != '\0'){
+        return REJSUB2;
     }
 
 
     //Check the ENNDID
-    if((u_char) buffer[12] == 0xff && (u_char) buffer[13] == 0xff){
+    if((u_char) buffer[8+MAXPAY] == 0xff && (u_char) buffer[9+MAXPAY] == 0xff){
         pack->endid = ENDID;
     }
     else{
-        pack->endid = buffer[12] + buffer[13];
+        pack->endid = buffer[8+MAXPAY] + buffer[9+MAXPAY];
         if(pack->endid != end){
-            return 7;
+            return REJSUB3;
         }
     }
 
-    printf("completed deserialize\n");
+    printf("Completed deserialize\n");
     return 0;
 
 };
 
-//buffer initilization
-packbuff *new_buffer(){
-    packbuff *b = malloc(sizeof(packet)*2);
+//Packet buffer initilizations. Returns appropriate size buffer depending on packet type used
+databuf *new_ackbuf(){
+    databuf *b = malloc(sizeof(ackpack)*2);
 
-    b->data = malloc(sizeof(packet));
-    b->size = sizeof(packet);
+    b->data = malloc(sizeof(ackpack));
+    b->size = sizeof(ackpack);
     b->next = 0;
 
     return b;
 };
 
+databuf *new_rejbuf(){
+    databuf *b = malloc(sizeof(rejpack)*2);
 
-//Create response packet
-packet *create_pack(unsigned short mess, unsigned char client, unsigned char tec, unsigned int ssn) {
-    const int nsegs = 1; //Only need 1 segment, this is only a verification server
-    packet *sendpack = malloc(sizeof(packet));
-
-    //initialize all the constant data
-    sendpack->startid = STARTID;
-    sendpack->clientid = client;
-    sendpack->mess = mess;
-    sendpack->segnum = nsegs;
-    sendpack->len = MAXPAY;
-
-    //insert payload into the packet
-    sendpack->tech = tec;
-    sendpack->ssnum = ssn;
-
-    //Insert endid
-    sendpack->endid = ENDID;
-
-    return sendpack;
+    b->data = malloc(sizeof(rejpack));
+    b->size = sizeof(rejpack);
+    b->next = 0;
 }
 
-//Serialize packet
-void serialize_pack(packet pack, packbuff *b){
+//Creates and send the ACK packet for the server
+int ack(char client, char segnum, int sockfd, struct sockaddr_in theiraddr){
+
+    ackpack *pack = malloc(sizeof(ackpack));
+    databuf *packbuff = new_ackbuf();
+    int numbytes;
+    int addr_len = sizeof(theiraddr);
+
+    pack->startid = STARTID;
+    pack->clientid = client;
+    pack->ack = ACK;
+    pack->segnum = segnum;
+    pack->endid = ENDID;
+    serialize_ack(*pack, packbuff);
+
+
+    numbytes = sendto(sockfd, packbuff->data, packbuff->size, 0, (struct sockaddr *)&theiraddr, addr_len);
+    if(numbytes == -1)
+    {
+        perror("Ack Failed\n");
+        exit(1);
+    } else{
+        printf("Ack Sent\n");
+    }
+    free(pack);
+    free(packbuff);
+
+};
+
+//Creates and sends the REJ packet for the server, including the subcode
+int rej(char client,char segnum, char sub, int sockfd, struct sockaddr_in theiraddr) {
+
+    rejpack *pack = malloc(sizeof(rejpack));
+    databuf *packbuff = new_rejbuf();
+    int numbytes;
+    int addr_len = sizeof(theiraddr);
+
+    pack->startid = STARTID;
+    pack->clientid = client;
+    pack->reject = REJECT;
+    pack->subc = sub;
+    pack->segnum = segnum;
+    pack->endid = ENDID;
+
+    serialize_rej(*pack,packbuff);
+    numbytes = sendto(sockfd, packbuff->data, packbuff->size, 0, (struct sockaddr *)&theiraddr, addr_len);
+    if(numbytes == -1)
+    {
+        perror("Rej Failed\n");
+        exit(1);
+    } else{
+        printf("Rej Sent\n");
+    }
+    free(pack);
+    free(packbuff);
+};
+
+//Serialize according to packet size
+void serialize_ack(ackpack pack, databuf *b){
     serialize_short(pack.startid,b);
     serialize_char(pack.clientid,b);
-    serialize_short(pack.mess,b);
+    serialize_short(pack.ack,b);
     serialize_char(pack.segnum,b);
-    serialize_char(pack.len,b);
-    serialize_char(pack.tech,b);
-    serialize_int(pack.ssnum,b);
+    serialize_short(pack.endid,b);
+};
+
+void serialize_rej(rejpack pack, databuf *b){
+    serialize_short(pack.startid,b);
+    serialize_char(pack.clientid,b);
+    serialize_short(pack.reject,b);
+    serialize_short(pack.subc,b);
+    serialize_char(pack.segnum,b);
     serialize_short(pack.endid,b);
 
 };
 
-
-//Serialize by data size
-void serialize_short(short x, packbuff *b) {
+//Serialize by data type. Takes one piece of data of a given and a buffer.
+//Places the data in the next spot and increments the location according to the size
+void serialize_short(short x, databuf *b){
     memcpy(((char *)b->data) + b->next, &x, sizeof(short));
     b->next += sizeof(short);
 };
 
-
-void serialize_char(char x, packbuff *b) {
-    //reserve(b,sizeof(char));
+void serialize_char(char x, databuf *b){
     memcpy(((char *)b->data)+ b->next,&x,sizeof(char));
     b->next += sizeof(char);
-};
-
-void serialize_int(int x, packbuff *b){
-    memcpy(((char *)b->data) + b->next, &x,sizeof(int));
-    b->next += sizeof(int);
-};
-
-//Check the database if subscriber exists, if their technology is allowed, and if they're paid
-int checkdb(FILE *db,unsigned int ssn,unsigned char tech){
-    int check = 0;
-    int buflen = 0;
-    char *buf=NULL;
-    dbpack *dbln = malloc(sizeof(dbpack));
-
-    //check db line by line to get ssn
-    while(check != -1){
-        check = getline(&buf,&buflen,db);
-        printf("line: %s\n",buf);
-        deserialize_db(dbln,buf);
-        if(dbln->ssnum == ssn){
-            break;
-        }
-    }
-
-    if(dbln->ssnum != ssn){
-        return DNE;
-    }if(dbln->tech != tech){
-        return 4;
-    }if(dbln->paid == 1){
-        return PAID;
-    }else {
-        return NPAID;
-    }
-
-};
-
-//deserialize the buffer into a dbln packet
-void deserialize_db(dbpack *db,char buf[]){
-
-    char ex[11];
-    for(int i = 0; i<10;i++){
-        ex[i] = buf[i];
-    }
-    ex[10] = '\0';
-
-    db->ssnum = atoi(ex);
-    db->tech = buf[12]-'0';
-    db->paid = buf[14]-'0';
-
 };
