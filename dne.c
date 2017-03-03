@@ -10,7 +10,7 @@
 
 #define SERVER "1337" //Server Port
 #define CLIENTID 0x45  //client id number
-#define SSNUM 0xf3847f35 //Source subscriber number
+#define SSNUM 0xf3b19382 //Source subscriber number
 #define TECH 04
 
 #define MAXPAY 5
